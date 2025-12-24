@@ -36,8 +36,8 @@ static void EnumSelectedItemsRecursive(obs_scene_t *scene, std::function<void(ob
         }
         
         if (obs_sceneitem_is_group(item)) {
-            obs_source_t *groupSource = obs_sceneitem_get_source(item);
-            obs_scene_t *groupScene = obs_scene_from_source(groupSource);
+            // Use the correct API to get group's internal scene
+            obs_scene_t *groupScene = obs_sceneitem_group_get_scene(item);
             if (groupScene) {
                 EnumSelectedItemsRecursive(groupScene, *cb);
             }
@@ -148,9 +148,12 @@ SourceResizerDock::SourceResizerDock(QWidget *parent) : QWidget(parent)
     connect(xSpin, &QSpinBox::valueChanged, this, &SourceResizerDock::handlePositionChange);
     connect(ySpin, &QSpinBox::valueChanged, this, &SourceResizerDock::handlePositionChange);
 
-    // Modifier Timer
+    // Modifier Timer + Selection Polling (for group children which don't emit signals)
     QTimer *timer = new QTimer(this);
-    connect(timer, &QTimer::timeout, this, &SourceResizerDock::updateModifierLabels);
+    connect(timer, &QTimer::timeout, this, [this]() {
+        updateModifierLabels();
+        RefreshFromSelection(); // Poll for selection changes
+    });
     timer->start(100);
 
     // Init OBS
@@ -254,8 +257,7 @@ void SourceResizerDock::SubscribeRecursive(obs_scene_t *scene)
     // Recurse into groups
     obs_scene_enum_items(scene, [](obs_scene_t *, obs_sceneitem_t *item, void *param) {
         if (obs_sceneitem_is_group(item)) {
-            obs_source_t *gSource = obs_sceneitem_get_source(item);
-            obs_scene_t *gScene = obs_scene_from_source(gSource);
+            obs_scene_t *gScene = obs_sceneitem_group_get_scene(item);
             if (gScene) {
                 SourceResizerDock *dock = reinterpret_cast<SourceResizerDock*>(param);
                 dock->SubscribeRecursive(gScene);
@@ -358,42 +360,14 @@ void SourceResizerDock::RefreshFromSelection()
 
     obs_sceneitem_t *selectedItem = nullptr;
     
-    // Context for recursion
-    struct FindData {
-        obs_sceneitem_t **target; 
-        std::function<bool(obs_scene_t*)> recurse;
+    // Use the proven recursive helper
+    std::function<void(obs_sceneitem_t*)> finder = [&](obs_sceneitem_t *item) {
+        if (!selectedItem) {
+            selectedItem = item;
+        }
     };
-
-    // Recursive finder
-    std::function<bool(obs_scene_t*)> findRecursive = [&](obs_scene_t *currentScene) -> bool {
-        FindData data;
-        data.target = &selectedItem;
-        data.recurse = findRecursive;
-        
-        obs_scene_enum_items(currentScene, [](obs_scene_t *scene, obs_sceneitem_t *item, void *param) {
-            FindData *pData = (FindData*)param;
-
-            if (obs_sceneitem_selected(item)) {
-                *(pData->target) = item;
-                return false; // Stop enumeration, found it
-            }
-            
-            if (obs_sceneitem_is_group(item)) {
-                obs_source_t *groupSource = obs_sceneitem_get_source(item);
-                obs_scene_t *groupScene = obs_scene_from_source(groupSource);
-                if (groupScene) {
-                    if (pData->recurse(groupScene)) {
-                        return false; 
-                    }
-                }
-            }
-            return true;
-        }, (void*)&data);
-        
-        return (selectedItem != nullptr);
-    };
-
-    findRecursive(scene);
+    
+    EnumSelectedItemsRecursive(scene, finder);
 
     // Update UI
     if (selectedItem) {
