@@ -3,6 +3,7 @@
 #include <QWidget>
 #include <obs-module.h>
 #include <obs-frontend-api.h>
+#include <vector>
 #include "anchor-button.hpp"
 
 class QSpinBox;
@@ -63,9 +64,13 @@ private:
     
     // Popup Elements
     QWidget *anchorPopup;
+    
+    // Track multiple sources (Main scene + Groups)
+    std::vector<obs_source_t*> trackedSources;
+    
+    void SubscribeRecursive(obs_scene_t *scene);
+    void UnsubscribeAll();
+    
     QLabel *shiftLabel;
     QLabel *altLabel;
-
-    obs_source_t *trackedSource = nullptr;
-    signal_handler_t *sceneSignalHandler = nullptr;
 };

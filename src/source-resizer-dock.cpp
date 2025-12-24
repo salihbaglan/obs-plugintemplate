@@ -15,6 +15,8 @@
 #include <QStackedLayout>
 #include <QLineEdit>
 #include <QCheckBox>
+#include <functional>
+#include <utility>
 #include "anchor-button.hpp"
 
 // Global callback wrapper
@@ -22,6 +24,26 @@ static void frontend_event_callback(enum obs_frontend_event event, void *param)
 {
     SourceResizerDock *dock = reinterpret_cast<SourceResizerDock*>(param);
     dock->HandleFrontendEvent(event);
+}
+
+// Helper for recursive enumeration of selected items
+static void EnumSelectedItemsRecursive(obs_scene_t *scene, std::function<void(obs_sceneitem_t*)> callback) {
+    obs_scene_enum_items(scene, [](obs_scene_t *, obs_sceneitem_t *item, void *param) {
+        auto *cb = reinterpret_cast<std::function<void(obs_sceneitem_t*)>*>(param);
+        
+        if (obs_sceneitem_selected(item)) {
+            (*cb)(item);
+        }
+        
+        if (obs_sceneitem_is_group(item)) {
+            obs_source_t *groupSource = obs_sceneitem_get_source(item);
+            obs_scene_t *groupScene = obs_scene_from_source(groupSource);
+            if (groupScene) {
+                EnumSelectedItemsRecursive(groupScene, *cb);
+            }
+        }
+        return true;
+    }, &callback);
 }
 
 SourceResizerDock::SourceResizerDock(QWidget *parent) : QWidget(parent)
@@ -205,38 +227,61 @@ void SourceResizerDock::keyReleaseEvent(QKeyEvent *event) { updateModifierLabels
 
 void SourceResizerDock::SubscribeToScene(obs_scene_t *scene)
 {
+    UnsubscribeAll();
+    SubscribeRecursive(scene);
+}
+
+void SourceResizerDock::SubscribeRecursive(obs_scene_t *scene)
+{
     obs_source_t *source = obs_scene_get_source(scene);
-    if (trackedSource == source) return; 
+    if (!source) return;
 
-    UnsubscribeFromScene();
-
-    if (source) {
-        trackedSource = source;
-        // STRONG REFERENCE to prevent crash if scene destroyed before dock
-        obs_source_get_ref(trackedSource);
-        
-        sceneSignalHandler = obs_source_get_signal_handler(source);
-
-        if (sceneSignalHandler) {
-            signal_handler_connect(sceneSignalHandler, "item_select", OBSSceneItemSignal, this);
-            signal_handler_connect(sceneSignalHandler, "item_deselect", OBSSceneItemSignal, this);
-            signal_handler_connect(sceneSignalHandler, "item_transform", OBSSceneItemSignal, this);
-        }
+    // Check if already tracked
+    for (auto *s : trackedSources) {
+        if (s == source) return;
     }
+
+    obs_source_get_ref(source);
+    trackedSources.push_back(source);
+
+    signal_handler_t *sh = obs_source_get_signal_handler(source);
+    if (sh) {
+        signal_handler_connect(sh, "item_select", OBSSceneItemSignal, this);
+        signal_handler_connect(sh, "item_deselect", OBSSceneItemSignal, this);
+        signal_handler_connect(sh, "item_transform", OBSSceneItemSignal, this);
+    }
+    
+    // Recurse into groups
+    obs_scene_enum_items(scene, [](obs_scene_t *, obs_sceneitem_t *item, void *param) {
+        if (obs_sceneitem_is_group(item)) {
+            obs_source_t *gSource = obs_sceneitem_get_source(item);
+            obs_scene_t *gScene = obs_scene_from_source(gSource);
+            if (gScene) {
+                SourceResizerDock *dock = reinterpret_cast<SourceResizerDock*>(param);
+                dock->SubscribeRecursive(gScene);
+            }
+        }
+        return true;
+    }, this);
+}
+
+void SourceResizerDock::UnsubscribeAll()
+{
+    for (obs_source_t *source : trackedSources) {
+        signal_handler_t *sh = obs_source_get_signal_handler(source);
+        if (sh) {
+            signal_handler_disconnect(sh, "item_select", OBSSceneItemSignal, this);
+            signal_handler_disconnect(sh, "item_deselect", OBSSceneItemSignal, this);
+            signal_handler_disconnect(sh, "item_transform", OBSSceneItemSignal, this);
+        }
+        obs_source_release(source);
+    }
+    trackedSources.clear();
 }
 
 void SourceResizerDock::UnsubscribeFromScene()
 {
-    if (trackedSource) {
-        if (sceneSignalHandler) {
-            signal_handler_disconnect(sceneSignalHandler, "item_select", OBSSceneItemSignal, this);
-            signal_handler_disconnect(sceneSignalHandler, "item_deselect", OBSSceneItemSignal, this);
-            signal_handler_disconnect(sceneSignalHandler, "item_transform", OBSSceneItemSignal, this);
-        }
-        obs_source_release(trackedSource);
-        trackedSource = nullptr;
-    }
-    sceneSignalHandler = nullptr;
+    UnsubscribeAll();
 }
 
 void SourceResizerDock::OBSSceneItemSignal(void *data, calldata_t *cd)
@@ -266,21 +311,14 @@ void SourceResizerDock::handleRenaming()
     obs_scene_t *scene = obs_scene_from_source(source);
     if (!scene) { obs_source_release(source); return; }
 
-    auto callback = [&](obs_scene_t *, obs_sceneitem_t *item) {
-        if (obs_sceneitem_selected(item)) {
-             obs_source_t *itemSource = obs_sceneitem_get_source(item);
-             if (itemSource) {
-                 obs_source_set_name(itemSource, nameEdit->text().toUtf8().constData());
-             }
-             return false; // Stop after first selected found? Or rename all? Usually one selected. 
-        }
-        return true;
+    std::function<void(obs_sceneitem_t*)> action = [&](obs_sceneitem_t *item) {
+         obs_source_t *itemSource = obs_sceneitem_get_source(item);
+         if (itemSource) {
+             obs_source_set_name(itemSource, nameEdit->text().toUtf8().constData());
+         }
     };
 
-    obs_scene_enum_items(scene, [](obs_scene_t *scene, obs_sceneitem_t *item, void *param) {
-        auto func = reinterpret_cast<decltype(callback)*>(param);
-        return (*func)(scene, item);
-    }, &callback);
+    EnumSelectedItemsRecursive(scene, action);
 
     obs_source_release(source);
 }
@@ -295,17 +333,11 @@ void SourceResizerDock::handleVisibility(int state)
 
     bool visible = (state == Qt::Checked);
 
-    auto callback = [&](obs_scene_t *, obs_sceneitem_t *item) {
-        if (obs_sceneitem_selected(item)) {
-             obs_sceneitem_set_visible(item, visible);
-        }
-        return true;
+    std::function<void(obs_sceneitem_t*)> action = [&](obs_sceneitem_t *item) {
+         obs_sceneitem_set_visible(item, visible);
     };
 
-    obs_scene_enum_items(scene, [](obs_scene_t *scene, obs_sceneitem_t *item, void *param) {
-        auto func = reinterpret_cast<decltype(callback)*>(param);
-        return (*func)(scene, item);
-    }, &callback);
+    EnumSelectedItemsRecursive(scene, action);
 
     obs_source_release(source);
 }
@@ -326,18 +358,42 @@ void SourceResizerDock::RefreshFromSelection()
 
     obs_sceneitem_t *selectedItem = nullptr;
     
-    auto findSelected = [&](obs_scene_t *, obs_sceneitem_t *item) {
-        if (obs_sceneitem_selected(item)) {
-            selectedItem = item;
-            return false;
-        }
-        return true;
+    // Context for recursion
+    struct FindData {
+        obs_sceneitem_t **target; 
+        std::function<bool(obs_scene_t*)> recurse;
     };
 
-    obs_scene_enum_items(scene, [](obs_scene_t *scene, obs_sceneitem_t *item, void *param) {
-        auto func = reinterpret_cast<decltype(findSelected)*>(param);
-        return (*func)(scene, item);
-    }, &findSelected);
+    // Recursive finder
+    std::function<bool(obs_scene_t*)> findRecursive = [&](obs_scene_t *currentScene) -> bool {
+        FindData data;
+        data.target = &selectedItem;
+        data.recurse = findRecursive;
+        
+        obs_scene_enum_items(currentScene, [](obs_scene_t *scene, obs_sceneitem_t *item, void *param) {
+            FindData *pData = (FindData*)param;
+
+            if (obs_sceneitem_selected(item)) {
+                *(pData->target) = item;
+                return false; // Stop enumeration, found it
+            }
+            
+            if (obs_sceneitem_is_group(item)) {
+                obs_source_t *groupSource = obs_sceneitem_get_source(item);
+                obs_scene_t *groupScene = obs_scene_from_source(groupSource);
+                if (groupScene) {
+                    if (pData->recurse(groupScene)) {
+                        return false; 
+                    }
+                }
+            }
+            return true;
+        }, (void*)&data);
+        
+        return (selectedItem != nullptr);
+    };
+
+    findRecursive(scene);
 
     // Update UI
     if (selectedItem) {
@@ -411,11 +467,9 @@ void SourceResizerDock::handleResize()
         return;
     }
 
-    auto applyResize = [&](obs_scene_t *, obs_sceneitem_t *item) {
-        if (!obs_sceneitem_selected(item)) return true;
-
+    std::function<void(obs_sceneitem_t*)> action = [&](obs_sceneitem_t *item) {
         obs_source_t *itemSource = obs_sceneitem_get_source(item);
-        if (!itemSource) return true;
+        if (!itemSource) return;
 
         float targetW = (float)widthSpin->value();
         float targetH = (float)heightSpin->value();
@@ -429,7 +483,7 @@ void SourceResizerDock::handleResize()
             uint32_t sourceW = obs_source_get_width(itemSource);
             uint32_t sourceH = obs_source_get_height(itemSource);
             
-            if (sourceW == 0 || sourceH == 0) return true;
+            if (sourceW == 0 || sourceH == 0) return;
 
             struct vec2 newScale;
             newScale.x = targetW / sourceW;
@@ -437,13 +491,9 @@ void SourceResizerDock::handleResize()
 
             obs_sceneitem_set_scale(item, &newScale);
         }
-        return true;
     };
 
-    obs_scene_enum_items(scene, [](obs_scene_t *scene, obs_sceneitem_t *item, void *param) {
-        auto func = reinterpret_cast<decltype(applyResize)*>(param);
-        return (*func)(scene, item);
-    }, &applyResize);
+    EnumSelectedItemsRecursive(scene, action);
 
     obs_source_release(source);
 }
@@ -459,21 +509,15 @@ void SourceResizerDock::handlePositionChange()
         return;
     }
 
-    auto applyPos = [&](obs_scene_t *, obs_sceneitem_t *item) {
-        if (!obs_sceneitem_selected(item)) return true;
-
+    std::function<void(obs_sceneitem_t*)> action = [&](obs_sceneitem_t *item) {
         struct vec2 newPos;
         newPos.x = (float)xSpin->value();
         newPos.y = (float)ySpin->value();
 
         obs_sceneitem_set_pos(item, &newPos);
-        return true;
     };
 
-    obs_scene_enum_items(scene, [](obs_scene_t *scene, obs_sceneitem_t *item, void *param) {
-        auto func = reinterpret_cast<decltype(applyPos)*>(param);
-        return (*func)(scene, item);
-    }, &applyPos);
+    EnumSelectedItemsRecursive(scene, action);
 
     obs_source_release(source);
 }
@@ -501,27 +545,17 @@ void SourceResizerDock::ApplyAnchorPreset(AnchorH h, AnchorV v)
     bool setPivot = (mods & Qt::ShiftModifier);
     bool setPosition = (mods & Qt::AltModifier);
     
-    auto callback = [&](obs_scene_t *, obs_sceneitem_t *item) {
-        if (!obs_sceneitem_selected(item)) return true;
-
+    std::function<void(obs_sceneitem_t*)> action = [&](obs_sceneitem_t *item) {
         // 1. alignment logic (Shift)
         uint32_t newAlign = 0;
         if (h == AnchorH::Left) newAlign |= OBS_ALIGN_LEFT;
         else if (h == AnchorH::Right) newAlign |= OBS_ALIGN_RIGHT;
         else if (h == AnchorH::Center) newAlign |= 0; // Center is 0
-        // Stretch usually implies Top-Left or maintaining current? 
-        // Unity sets Pivot to 0.5,0.5 for stretch usually unless specified.
-        // Let's keep it simple: If Shift is pressed, we set alignment based on the button.
-        // For stretch buttons, usually the specific axis is implicitly centered or 0 depending on the specific preset?
-        // Let's assume Middle-Stretch means Align Center-Left? No.
-        // Let's stick to standard behavior: If user wants Left, set Left.
         
         if (v == AnchorV::Top) newAlign |= OBS_ALIGN_TOP;
         else if (v == AnchorV::Bottom) newAlign |= OBS_ALIGN_BOTTOM;
 
         if (setPivot) {
-            // For stretch, we might not want to force alignment unless explicit?
-            // But if I clicked "Top Center", I expect pivot there.
              obs_sceneitem_set_alignment(item, newAlign);
         }
 
@@ -590,14 +624,9 @@ void SourceResizerDock::ApplyAnchorPreset(AnchorH h, AnchorV v)
 
              obs_sceneitem_set_pos(item, &finalPos);
         }
-
-        return true;
     };
 
-    obs_scene_enum_items(scene, [](obs_scene_t *scene, obs_sceneitem_t *item, void *param) {
-        auto func = reinterpret_cast<decltype(callback)*>(param);
-        return (*func)(scene, item);
-    }, &callback);
+    EnumSelectedItemsRecursive(scene, action);
 
     obs_source_release(source);
 }
