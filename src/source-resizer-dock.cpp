@@ -13,6 +13,8 @@
 #include <QApplication>
 #include <QGridLayout>
 #include <QStackedLayout>
+#include <QLineEdit>
+#include <QCheckBox>
 #include "anchor-button.hpp"
 
 // Global callback wrapper
@@ -35,9 +37,28 @@ SourceResizerDock::SourceResizerDock(QWidget *parent) : QWidget(parent)
 
     // 2. Controls Widget
     controlsWidget = new QWidget(this);
-    QHBoxLayout *mainLayout = new QHBoxLayout(controlsWidget);
-    mainLayout->setContentsMargins(5, 5, 5, 5);
+    QVBoxLayout *rootLayout = new QVBoxLayout(controlsWidget);
+    rootLayout->setContentsMargins(5, 5, 5, 5);
+    rootLayout->setSpacing(5);
+
+    // TOP: Name and Visibility
+    QHBoxLayout *topLayout = new QHBoxLayout();
+    visCheck = new QCheckBox(this);
+    visCheck->setToolTip("Toggle Visibility");
+    connect(visCheck, &QCheckBox::checkStateChanged, this, &SourceResizerDock::handleVisibility);
+    
+    nameEdit = new QLineEdit(this);
+    nameEdit->setPlaceholderText("Source Name");
+    connect(nameEdit, &QLineEdit::editingFinished, this, &SourceResizerDock::handleRenaming);
+
+    topLayout->addWidget(visCheck);
+    topLayout->addWidget(nameEdit);
+    rootLayout->addLayout(topLayout);
+
+    // MIDDLE: Unity RectTransform Area
+    QHBoxLayout *mainLayout = new QHBoxLayout();
     mainLayout->setSpacing(10);
+    rootLayout->addLayout(mainLayout);
 
     // LEFT: Main Anchor Button
     mainAnchorBtn = new AnchorButton(AnchorH::Center, AnchorV::Middle, this);
@@ -63,7 +84,7 @@ SourceResizerDock::SourceResizerDock(QWidget *parent) : QWidget(parent)
     // Row 1: SpinBoxes
     xSpin = new QSpinBox(this);
     xSpin->setRange(-10000, 10000);
-    xSpin->setButtonSymbols(QAbstractSpinBox::NoButtons); // Unity style cleaner look? Or keep buttons? Let's keep for now but maybe styled.
+    xSpin->setButtonSymbols(QAbstractSpinBox::NoButtons); 
     
     ySpin = new QSpinBox(this);
     ySpin->setRange(-10000, 10000);
@@ -88,7 +109,7 @@ SourceResizerDock::SourceResizerDock(QWidget *parent) : QWidget(parent)
     fieldGrid->addWidget(widthSpin, 3, 0);
     fieldGrid->addWidget(heightSpin, 3, 1);
     
-    // Add Row 4 (Pivot Z/Rotation placeholder or just stretch)
+    // Add Row 4
     fieldGrid->setRowStretch(4, 1);
 
     mainLayout->addLayout(fieldGrid);
@@ -112,6 +133,8 @@ SourceResizerDock::SourceResizerDock(QWidget *parent) : QWidget(parent)
 
     // Init OBS
     obs_frontend_add_event_callback(frontend_event_callback, this);
+    
+    // Initial subscription
     obs_source_t *source = obs_frontend_get_current_scene();
     if (source) {
         obs_scene_t *scene = obs_scene_from_source(source);
@@ -235,6 +258,58 @@ void SourceResizerDock::HandleFrontendEvent(enum obs_frontend_event event)
     }
 }
 
+void SourceResizerDock::handleRenaming()
+{
+    obs_source_t *source = obs_frontend_get_current_scene();
+    if (!source) return;
+
+    obs_scene_t *scene = obs_scene_from_source(source);
+    if (!scene) { obs_source_release(source); return; }
+
+    auto callback = [&](obs_scene_t *, obs_sceneitem_t *item) {
+        if (obs_sceneitem_selected(item)) {
+             obs_source_t *itemSource = obs_sceneitem_get_source(item);
+             if (itemSource) {
+                 obs_source_set_name(itemSource, nameEdit->text().toUtf8().constData());
+             }
+             return false; // Stop after first selected found? Or rename all? Usually one selected. 
+        }
+        return true;
+    };
+
+    obs_scene_enum_items(scene, [](obs_scene_t *scene, obs_sceneitem_t *item, void *param) {
+        auto func = reinterpret_cast<decltype(callback)*>(param);
+        return (*func)(scene, item);
+    }, &callback);
+
+    obs_source_release(source);
+}
+
+void SourceResizerDock::handleVisibility(int state)
+{
+    obs_source_t *source = obs_frontend_get_current_scene();
+    if (!source) return;
+
+    obs_scene_t *scene = obs_scene_from_source(source);
+    if (!scene) { obs_source_release(source); return; }
+
+    bool visible = (state == Qt::Checked);
+
+    auto callback = [&](obs_scene_t *, obs_sceneitem_t *item) {
+        if (obs_sceneitem_selected(item)) {
+             obs_sceneitem_set_visible(item, visible);
+        }
+        return true;
+    };
+
+    obs_scene_enum_items(scene, [](obs_scene_t *scene, obs_sceneitem_t *item, void *param) {
+        auto func = reinterpret_cast<decltype(callback)*>(param);
+        return (*func)(scene, item);
+    }, &callback);
+
+    obs_source_release(source);
+}
+
 void SourceResizerDock::RefreshFromSelection()
 {
     obs_source_t *source = obs_frontend_get_current_scene();
@@ -245,6 +320,9 @@ void SourceResizerDock::RefreshFromSelection()
         obs_source_release(source);
         return;
     }
+
+    // Ensure we are tracking this scene
+    SubscribeToScene(scene);
 
     obs_sceneitem_t *selectedItem = nullptr;
     
@@ -274,10 +352,13 @@ void SourceResizerDock::RefreshFromSelection()
         obs_source_t *itemSource = obs_sceneitem_get_source(selectedItem);
         float itemW = 0.0f;
         float itemH = 0.0f;
+        const char* name = "";
+        bool visible = true;
         
         if (itemSource) {
             itemW = (float)obs_source_get_width(itemSource) * scale.x;
             itemH = (float)obs_source_get_height(itemSource) * scale.y;
+            name = obs_source_get_name(itemSource);
             
              // Handle bounds if present
             if (obs_sceneitem_get_bounds_type(selectedItem) != OBS_BOUNDS_NONE) {
@@ -287,22 +368,29 @@ void SourceResizerDock::RefreshFromSelection()
                 itemH = bounds.y;
             }
         }
+        visible = obs_sceneitem_visible(selectedItem);
 
         // Block signals to prevent feedback loop
         widthSpin->blockSignals(true);
         heightSpin->blockSignals(true);
         xSpin->blockSignals(true);
         ySpin->blockSignals(true);
+        nameEdit->blockSignals(true);
+        visCheck->blockSignals(true);
 
         widthSpin->setValue((int)itemW);
         heightSpin->setValue((int)itemH);
         xSpin->setValue((int)pos.x);
         ySpin->setValue((int)pos.y);
+        nameEdit->setText(QString::fromUtf8(name));
+        visCheck->setChecked(visible);
 
         widthSpin->blockSignals(false);
         heightSpin->blockSignals(false);
         xSpin->blockSignals(false);
         ySpin->blockSignals(false);
+        nameEdit->blockSignals(false);
+        visCheck->blockSignals(false);
         
         this->setEnabled(true);
     } else {

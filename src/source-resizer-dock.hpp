@@ -9,6 +9,8 @@ class QSpinBox;
 class QPushButton;
 class QLabel;
 class QStackedLayout;
+class QLineEdit;
+class QCheckBox;
 
 class SourceResizerDock : public QWidget {
     Q_OBJECT
@@ -33,11 +35,14 @@ private slots:
     void onAnchorClicked();
     void updateModifierLabels();
     void toggleAnchorPopup();
+    void handleRenaming();
+    void handleVisibility(int state);
 
 private:
     void SubscribeToScene(obs_scene_t *scene);
     void UnsubscribeFromScene();
     void ApplyAnchorPreset(AnchorH h, AnchorV v);
+    void CreateAnchorPopup();
     
     // Static callbacks for OBS signals
     static void OBSSceneItemSignal(void *data, calldata_t *cd);
@@ -47,7 +52,9 @@ private:
     QLabel *noSelectionLabel;
     
     // Main UI Elements
-    AnchorButton *mainAnchorBtn; // The big button on the left
+    QLineEdit *nameEdit;
+    QCheckBox *visCheck;
+    AnchorButton *mainAnchorBtn; 
     
     QSpinBox *widthSpin;
     QSpinBox *heightSpin;
@@ -58,10 +65,7 @@ private:
     QWidget *anchorPopup;
     QLabel *shiftLabel;
     QLabel *altLabel;
-    
-    // Helper to create the popup
-    void CreateAnchorPopup();
-    
+
     obs_source_t *trackedSource = nullptr;
     signal_handler_t *sceneSignalHandler = nullptr;
 };
