@@ -35,112 +35,133 @@ SourceResizerDock::SourceResizerDock(QWidget *parent) : QWidget(parent)
 
     // 2. Controls Widget
     controlsWidget = new QWidget(this);
-    QVBoxLayout *mainLayout = new QVBoxLayout(controlsWidget);
+    QHBoxLayout *mainLayout = new QHBoxLayout(controlsWidget);
+    mainLayout->setContentsMargins(5, 5, 5, 5);
+    mainLayout->setSpacing(10);
 
-    // Resize Section
-    QGroupBox *resizeGroup = new QGroupBox("Size (Live Update)", this);
-    QVBoxLayout *resizeLayout = new QVBoxLayout(resizeGroup);
+    // LEFT: Main Anchor Button
+    mainAnchorBtn = new AnchorButton(AnchorH::Center, AnchorV::Middle, this);
+    mainAnchorBtn->setFixedSize(60, 60);
+    mainAnchorBtn->setCursor(Qt::PointingHandCursor);
+    mainAnchorBtn->setToolTip("Anchor Presets");
+    connect(mainAnchorBtn, &QPushButton::clicked, this, &SourceResizerDock::toggleAnchorPopup);
     
-    QHBoxLayout *sizeInputLayout = new QHBoxLayout();
-    widthSpin = new QSpinBox(this);
-    widthSpin->setRange(1, 10000);
-    widthSpin->setValue(1920);
-    widthSpin->setPrefix("W: ");
+    // Container for Left side to align top
+    QVBoxLayout *leftLayout = new QVBoxLayout();
+    leftLayout->addWidget(mainAnchorBtn);
+    leftLayout->addStretch();
+    mainLayout->addLayout(leftLayout);
+
+    // RIGHT: Fields Grid (Pos X, Pos Y, W, H)
+    QGridLayout *fieldGrid = new QGridLayout();
+    fieldGrid->setSpacing(5);
     
-    heightSpin = new QSpinBox(this);
-    heightSpin->setRange(1, 10000);
-    heightSpin->setValue(1080);
-    heightSpin->setPrefix("H: ");
-
-    // Connect signals for live update
-    connect(widthSpin, &QSpinBox::valueChanged, this, &SourceResizerDock::handleResize);
-    connect(heightSpin, &QSpinBox::valueChanged, this, &SourceResizerDock::handleResize);
-
-    sizeInputLayout->addWidget(widthSpin);
-    sizeInputLayout->addWidget(heightSpin);
-    resizeLayout->addLayout(sizeInputLayout);
-    mainLayout->addWidget(resizeGroup);
-
-    // Position Section
-    QGroupBox *posGroup = new QGroupBox("Position (Live Update)", this);
-    QVBoxLayout *posLayout = new QVBoxLayout(posGroup);
+    // Row 0: Labels
+    fieldGrid->addWidget(new QLabel("Pos X"), 0, 0);
+    fieldGrid->addWidget(new QLabel("Pos Y"), 0, 1);
     
-    QHBoxLayout *posInputLayout = new QHBoxLayout();
+    // Row 1: SpinBoxes
     xSpin = new QSpinBox(this);
     xSpin->setRange(-10000, 10000);
-    xSpin->setValue(0);
-    xSpin->setPrefix("X: ");
+    xSpin->setButtonSymbols(QAbstractSpinBox::NoButtons); // Unity style cleaner look? Or keep buttons? Let's keep for now but maybe styled.
     
     ySpin = new QSpinBox(this);
     ySpin->setRange(-10000, 10000);
-    ySpin->setValue(0);
-    ySpin->setPrefix("Y: ");
+    ySpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
 
-    // Connect signals for live update
+    fieldGrid->addWidget(xSpin, 1, 0);
+    fieldGrid->addWidget(ySpin, 1, 1);
+
+    // Row 2: Labels
+    fieldGrid->addWidget(new QLabel("Width"), 2, 0);
+    fieldGrid->addWidget(new QLabel("Height"), 2, 1);
+
+    // Row 3: SpinBoxes
+    widthSpin = new QSpinBox(this);
+    widthSpin->setRange(1, 10000);
+    widthSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    
+    heightSpin = new QSpinBox(this);
+    heightSpin->setRange(1, 10000);
+    heightSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+
+    fieldGrid->addWidget(widthSpin, 3, 0);
+    fieldGrid->addWidget(heightSpin, 3, 1);
+    
+    // Add Row 4 (Pivot Z/Rotation placeholder or just stretch)
+    fieldGrid->setRowStretch(4, 1);
+
+    mainLayout->addLayout(fieldGrid);
+    
+    mainStack->addWidget(controlsWidget);
+    mainStack->setCurrentWidget(noSelectionLabel);
+
+    // Create the Popup (Hidden by default)
+    CreateAnchorPopup();
+
+    // Connect input signals
+    connect(widthSpin, &QSpinBox::valueChanged, this, &SourceResizerDock::handleResize);
+    connect(heightSpin, &QSpinBox::valueChanged, this, &SourceResizerDock::handleResize);
     connect(xSpin, &QSpinBox::valueChanged, this, &SourceResizerDock::handlePositionChange);
     connect(ySpin, &QSpinBox::valueChanged, this, &SourceResizerDock::handlePositionChange);
 
-    posInputLayout->addWidget(xSpin);
-    posInputLayout->addWidget(ySpin);
-    posLayout->addLayout(posInputLayout);
-    mainLayout->addWidget(posGroup);
-
-    // Anchor Presets Section
-    QGroupBox *anchorGroup = new QGroupBox("Anchor Presets", this);
-    QVBoxLayout *anchorMainLayout = new QVBoxLayout(anchorGroup);
-    
-    // Modifier Info Labels
-    QHBoxLayout *modLayout = new QHBoxLayout();
-    shiftLabel = new QLabel("Shift: Pivot", this);
-    altLabel = new QLabel("Alt: Position", this);
-    shiftLabel->setStyleSheet("color: gray;");
-    altLabel->setStyleSheet("color: gray;");
-    modLayout->addWidget(shiftLabel);
-    modLayout->addWidget(altLabel);
-    anchorMainLayout->addLayout(modLayout);
-
-    // timer to update modifier status purely for visual feedback
+    // Modifier Timer
     QTimer *timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, &SourceResizerDock::updateModifierLabels);
     timer->start(100);
 
-    QGridLayout *gridLayout = new QGridLayout();
-    gridLayout->setSpacing(4);
-
-    // Define the grid logic
-    AnchorV vRows[] = { AnchorV::Top, AnchorV::Middle, AnchorV::Bottom, AnchorV::Stretch };
-    AnchorH hCols[] = { AnchorH::Left, AnchorH::Center, AnchorH::Right, AnchorH::Stretch };
-
-    for (int r = 0; r < 4; r++) {
-        for (int c = 0; c < 4; c++) {
-            AnchorButton *btn = new AnchorButton(hCols[c], vRows[r], this);
-            connect(btn, &QPushButton::clicked, this, &SourceResizerDock::onAnchorClicked);
-            gridLayout->addWidget(btn, r, c);
-        }
-    }
-
-    anchorMainLayout->addLayout(gridLayout);
-    mainLayout->addWidget(anchorGroup);
-    mainLayout->addStretch();
-    
-    mainStack->addWidget(controlsWidget);
-
-    // Default to empty
-    mainStack->setCurrentWidget(noSelectionLabel);
-
-    // Init Logic
+    // Init OBS
     obs_frontend_add_event_callback(frontend_event_callback, this);
-    
-    // Initial subscription
     obs_source_t *source = obs_frontend_get_current_scene();
     if (source) {
         obs_scene_t *scene = obs_scene_from_source(source);
         SubscribeToScene(scene);
         obs_source_release(source);
     }
-    
-    // Initial Refresh
     RefreshFromSelection();
+}
+
+void SourceResizerDock::CreateAnchorPopup()
+{
+    anchorPopup = new QWidget(this, Qt::Popup);
+    anchorPopup->setStyleSheet("background-color: #333; border: 1px solid #555;");
+    QVBoxLayout *layout = new QVBoxLayout(anchorPopup);
+    layout->setContentsMargins(5, 5, 5, 5);
+    
+    QHBoxLayout *modLayout = new QHBoxLayout();
+    shiftLabel = new QLabel("Shift: Pivot", anchorPopup);
+    altLabel = new QLabel("Alt: Position", anchorPopup);
+    shiftLabel->setStyleSheet("color: gray;");
+    altLabel->setStyleSheet("color: gray;");
+    modLayout->addWidget(shiftLabel);
+    modLayout->addWidget(altLabel);
+    layout->addLayout(modLayout);
+
+    QGridLayout *grid = new QGridLayout();
+    grid->setSpacing(2);
+    
+    AnchorV vRows[] = { AnchorV::Top, AnchorV::Middle, AnchorV::Bottom, AnchorV::Stretch };
+    AnchorH hCols[] = { AnchorH::Left, AnchorH::Center, AnchorH::Right, AnchorH::Stretch };
+
+    for (int r = 0; r < 4; r++) {
+        for (int c = 0; c < 4; c++) {
+            AnchorButton *btn = new AnchorButton(hCols[c], vRows[r], anchorPopup);
+            connect(btn, &QPushButton::clicked, this, &SourceResizerDock::onAnchorClicked);
+            grid->addWidget(btn, r, c);
+        }
+    }
+    layout->addLayout(grid);
+}
+
+void SourceResizerDock::toggleAnchorPopup()
+{
+    if (anchorPopup->isVisible()) {
+        anchorPopup->hide();
+    } else {
+        QPoint p = mainAnchorBtn->mapToGlobal(QPoint(0, mainAnchorBtn->height()));
+        anchorPopup->move(p);
+        anchorPopup->show();
+    }
 }
 
 SourceResizerDock::~SourceResizerDock()

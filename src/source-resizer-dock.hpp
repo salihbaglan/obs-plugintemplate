@@ -32,6 +32,7 @@ private slots:
     void handlePositionChange();
     void onAnchorClicked();
     void updateModifierLabels();
+    void toggleAnchorPopup();
 
 private:
     void SubscribeToScene(obs_scene_t *scene);
@@ -45,14 +46,22 @@ private:
     QWidget *controlsWidget;
     QLabel *noSelectionLabel;
     
+    // Main UI Elements
+    AnchorButton *mainAnchorBtn; // The big button on the left
+    
     QSpinBox *widthSpin;
     QSpinBox *heightSpin;
     QSpinBox *xSpin;
     QSpinBox *ySpin;
     
+    // Popup Elements
+    QWidget *anchorPopup;
     QLabel *shiftLabel;
     QLabel *altLabel;
-
+    
+    // Helper to create the popup
+    void CreateAnchorPopup();
+    
     obs_source_t *trackedSource = nullptr;
     signal_handler_t *sceneSignalHandler = nullptr;
 };
