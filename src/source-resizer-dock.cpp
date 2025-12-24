@@ -1,4 +1,5 @@
 #include "source-resizer-dock.hpp"
+#include <obs.h>
 #include <obs-frontend-api.h>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -11,6 +12,7 @@
 #include <QKeyEvent>
 #include <QApplication>
 #include <QGridLayout>
+#include <QStackedLayout>
 #include "anchor-button.hpp"
 
 // Global callback wrapper
@@ -22,7 +24,18 @@ static void frontend_event_callback(enum obs_frontend_event event, void *param)
 
 SourceResizerDock::SourceResizerDock(QWidget *parent) : QWidget(parent)
 {
-    QVBoxLayout *mainLayout = new QVBoxLayout(this);
+    // Main Stack Layout
+    mainStack = new QStackedLayout(this);
+
+    // 1. No Selection Widget
+    noSelectionLabel = new QLabel("Select a source to edit", this);
+    noSelectionLabel->setAlignment(Qt::AlignCenter);
+    noSelectionLabel->setStyleSheet("color: gray; font-style: italic;");
+    mainStack->addWidget(noSelectionLabel);
+
+    // 2. Controls Widget
+    controlsWidget = new QWidget(this);
+    QVBoxLayout *mainLayout = new QVBoxLayout(controlsWidget);
 
     // Resize Section
     QGroupBox *resizeGroup = new QGroupBox("Size (Live Update)", this);
@@ -95,9 +108,6 @@ SourceResizerDock::SourceResizerDock(QWidget *parent) : QWidget(parent)
     gridLayout->setSpacing(4);
 
     // Define the grid logic
-    // Rows: Top, Middle, Bottom, Stretch
-    // Cols: Left, Center, Right, Stretch
-    
     AnchorV vRows[] = { AnchorV::Top, AnchorV::Middle, AnchorV::Bottom, AnchorV::Stretch };
     AnchorH hCols[] = { AnchorH::Left, AnchorH::Center, AnchorH::Right, AnchorH::Stretch };
 
@@ -111,8 +121,12 @@ SourceResizerDock::SourceResizerDock(QWidget *parent) : QWidget(parent)
 
     anchorMainLayout->addLayout(gridLayout);
     mainLayout->addWidget(anchorGroup);
-    
     mainLayout->addStretch();
+    
+    mainStack->addWidget(controlsWidget);
+
+    // Default to empty
+    mainStack->setCurrentWidget(noSelectionLabel);
 
     // Init Logic
     obs_frontend_add_event_callback(frontend_event_callback, this);
@@ -147,13 +161,16 @@ void SourceResizerDock::keyReleaseEvent(QKeyEvent *event) { updateModifierLabels
 
 void SourceResizerDock::SubscribeToScene(obs_scene_t *scene)
 {
-    if (trackedScene == scene) return; 
+    obs_source_t *source = obs_scene_get_source(scene);
+    if (trackedSource == source) return; 
 
     UnsubscribeFromScene();
 
-    if (scene) {
-        trackedScene = scene;
-        obs_source_t *source = obs_scene_get_source(scene);
+    if (source) {
+        trackedSource = source;
+        // STRONG REFERENCE to prevent crash if scene destroyed before dock
+        obs_source_get_ref(trackedSource);
+        
         sceneSignalHandler = obs_source_get_signal_handler(source);
 
         if (sceneSignalHandler) {
@@ -166,12 +183,15 @@ void SourceResizerDock::SubscribeToScene(obs_scene_t *scene)
 
 void SourceResizerDock::UnsubscribeFromScene()
 {
-    if (trackedScene && sceneSignalHandler) {
-        signal_handler_disconnect(sceneSignalHandler, "item_select", OBSSceneItemSignal, this);
-        signal_handler_disconnect(sceneSignalHandler, "item_deselect", OBSSceneItemSignal, this);
-        signal_handler_disconnect(sceneSignalHandler, "item_transform", OBSSceneItemSignal, this);
+    if (trackedSource) {
+        if (sceneSignalHandler) {
+            signal_handler_disconnect(sceneSignalHandler, "item_select", OBSSceneItemSignal, this);
+            signal_handler_disconnect(sceneSignalHandler, "item_deselect", OBSSceneItemSignal, this);
+            signal_handler_disconnect(sceneSignalHandler, "item_transform", OBSSceneItemSignal, this);
+        }
+        obs_source_release(trackedSource);
+        trackedSource = nullptr;
     }
-    trackedScene = nullptr;
     sceneSignalHandler = nullptr;
 }
 
@@ -220,7 +240,10 @@ void SourceResizerDock::RefreshFromSelection()
         return (*func)(scene, item);
     }, &findSelected);
 
+    // Update UI
     if (selectedItem) {
+        mainStack->setCurrentWidget(controlsWidget);
+
         struct vec2 pos;
         obs_sceneitem_get_pos(selectedItem, &pos);
         
@@ -235,6 +258,7 @@ void SourceResizerDock::RefreshFromSelection()
             itemW = (float)obs_source_get_width(itemSource) * scale.x;
             itemH = (float)obs_source_get_height(itemSource) * scale.y;
             
+             // Handle bounds if present
             if (obs_sceneitem_get_bounds_type(selectedItem) != OBS_BOUNDS_NONE) {
                 struct vec2 bounds;
                 obs_sceneitem_get_bounds(selectedItem, &bounds);
@@ -243,6 +267,7 @@ void SourceResizerDock::RefreshFromSelection()
             }
         }
 
+        // Block signals to prevent feedback loop
         widthSpin->blockSignals(true);
         heightSpin->blockSignals(true);
         xSpin->blockSignals(true);
@@ -259,6 +284,8 @@ void SourceResizerDock::RefreshFromSelection()
         ySpin->blockSignals(false);
         
         this->setEnabled(true);
+    } else {
+        mainStack->setCurrentWidget(noSelectionLabel);
     }
 
     obs_source_release(source);

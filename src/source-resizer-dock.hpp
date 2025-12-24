@@ -8,6 +8,7 @@
 class QSpinBox;
 class QPushButton;
 class QLabel;
+class QStackedLayout;
 
 class SourceResizerDock : public QWidget {
     Q_OBJECT
